@@ -1,0 +1,160 @@
+version: '3'
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-file: "5"
+    max-size: "10m"
+
+x-service: &default-service
+  restart: always
+  logging: *default-logging
+
+services:
+  mongodb:
+    <<: *default-service
+    hostname: easytravel-mongodb
+    container_name: mongodb
+    image: "dynatrace/easytravel-mongodb"
+
+  backend:
+    <<: *default-service      
+    hostname: easytravel-backend
+    container_name: backend
+    image: "dynatrace/easytravel-backend"
+    links:
+      - mongodb
+    volumes:
+      - /compartido/datadog/dd-java-agent.jar:/tmp/dd-java-agent.jar
+    environment:
+      CATALINA_OPTS: "-Dconfig.apmServerDefault=APM_EASY -Xmx300m -javaagent:/tmp/dd-java-agent.jar"
+      ET_DATABASE_LOCATION: "easytravel-mongodb:27017"
+      ET_MONGO_AUTH_DB: "admin"
+      ET_DATABASE_USER: "etAdmin"
+      ET_DATABASE_PASSWORD: "adminadmin"
+      DD_AGENT_HOST: "datadog-agent"
+      DD_TRACE_AGENT_PORT: "8126" 
+      DD_LOGS_INJECTION: true
+      DD_ENV: "Prod"
+      DD_SERVICE: "easytravel"
+      DD_PROFILING_DDPROF_ENABLED: "true"
+      DD_VERSION: "1.2"
+
+  datadog-agent:
+    <<: *default-service
+    image: gcr.io/datadoghq/agent:latest
+    hostname: datadog-agent
+    environment:
+      DD_API_KEY: "7edf8f64d559cec14ca71abde320d6b4"
+      DD_APM_ENABLED: true
+      DD_PROCESS_AGENT_ENABLED: true
+      DD_LOGS_ENABLED: false
+      DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL: false
+      DD_CONTAINER_EXCLUDE_LOGS: "name:datadog-agent"
+      DD_SITE: "datadoghq.com"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+    #labels: REQUIERE MONGO v6
+    #  com.datadoghq.ad.checks: '{ "mongo": { "init_config": {}, "instances": [{ "hosts": ["easytravel-mongodb:27017"], "username": "etAdmin", "password": "adminadmin", "options": { "authSource": "admin" }, "dbm": true, "cluster_name": "easytravel-mongo-cluster", "reported_database_hostname": "easytravel-mongodb", "additional_metrics": ["metrics.commands", "tcmalloc", "top", "collection"], "collections_indexes_stats": true, "database_autodiscovery": { "enabled": true } }] } }'
+
+  frontend:
+    <<: *default-service      
+    hostname: easytravel-frontend
+    container_name: frontend
+    image: "dynatrace/easytravel-frontend"
+    links:
+      - backend
+      - mongodb
+    volumes:
+      - /compartido/datadog/dd-java-agent.jar:/tmp/dd-java-agent.jar
+    environment:
+      CATALINA_OPTS: "-Dconfig.apmServerDefault=APM_EASY -Xmx525m -javaagent:/tmp/dd-java-agent.jar"
+      ET_BACKEND_URL: "http://easytravel-backend:8080"
+      DD_AGENT_HOST: "datadog-agent"
+      DD_TRACE_AGENT_PORT: "8126" 
+      DD_LOGS_INJECTION: true
+      DD_ENV: "Prod"
+      DD_SERVICE: "frontend"
+      DD_PROFILING_DDPROF_ENABLED: "true"
+      DD_VERSION: "1.2"
+
+  angular-frontend:
+    <<: *default-service      
+    hostname: easytravel-angular-frontend
+    container_name: angular-frontend
+    image: "dynatrace/easytravel-angular-frontend"
+    links:
+      - backend
+      - mongodb
+    volumes:
+      - /compartido/datadog/dd-java-agent.jar:/tmp/dd-java-agent.jar
+    environment:
+      CATALINA_OPTS: "-Dconfig.apmServerDefault=APM_EASY -Xmx525m -javaagent:/tmp/dd-java-agent.jar"
+      ET_BACKEND_URL: "http://easytravel-backend:8080"
+      DD_AGENT_HOST: "datadog-agent"
+      DD_TRACE_AGENT_PORT: "8126" 
+      DD_LOGS_INJECTION: true
+      DD_ENV: "Prod"
+      DD_SERVICE: "angular-frontend"
+      DD_PROFILING_DDPROF_ENABLED: "true"
+      DD_VERSION: "1.2"
+
+  www:
+    <<: *default-service       
+    hostname: easytravel-www
+    container_name: www
+    image: "dynatrace/easytravel-nginx"
+    links:
+      - frontend
+      - angular-frontend
+      - backend
+    environment:
+      ET_FRONTEND_LOCATION: "easytravel-frontend:8080"
+      ET_ANGULAR_FRONTEND_LOCATION: "easytravel-angular-frontend:8080"
+      ET_BACKEND_LOCATION: "easytravel-backend:8080"
+
+  headless-customer-loadgen:
+    <<: *default-service      
+    container_name: headless-customer-loadgen
+    image: "dynatrace/easytravel-headless-loadgen"
+    links:
+      - backend
+      - frontend
+      - www
+    environment:
+      ET_FRONTEND_URL: "http://easytravel-www:80"
+      ET_VISIT_NUMBER: 2
+      MAX_CHROME_DRIVERS: 4
+      SCENARIO_NAME: "Headless Customer Scenario"
+      ET_PROBLEMS: "BadCacheSynchronization,CPULoad,DatabaseCleanup,DatabaseSlowdown,FetchSizeTooSmall,JourneySearchError404,JourneySearchError500,LoginProblems,MobileErrors,TravellersOptionBox"
+
+  headless-angular-loadgen:
+    <<: *default-service      
+    container_name: headless-angular-loadgen
+    image: "dynatrace/easytravel-headless-loadgen"
+    links:
+      - backend
+      - angular-frontend
+      - www
+    environment:
+      ET_FRONTEND_URL: "http://easytravel-www:9079"
+      ET_VISIT_NUMBER: 2
+      MAX_CHROME_DRIVERS: 4
+      SCENARIO_NAME: "Headless Angular Scenario"
+      ET_PROBLEMS: "BadCacheSynchronization,CPULoad,DatabaseCleanup,DatabaseSlowdown,FetchSizeTooSmall,JourneySearchError404,JourneySearchError500,LoginProblems,MobileErrors,TravellersOptionBox"
+
+#  loadgen:
+#    <<: *default-service      
+#    container_name: loadgen
+#    image: "dynatrace/easytravel-loadgen"
+#    links:
+#      - backend
+#      - frontend
+#     - www
+#    environment:
+#      ET_FRONTEND_URL: "http://easytravel-www:80"
+#      ET_BACKEND_URL: "http://easytravel-www:8080"
+#      ET_PROBLEMS: "LoginProblems,MobileErrors"
+#      ET_VISIT_NUMBER: 3
+#      ET_PROBLEMS_DELAY: "300"
