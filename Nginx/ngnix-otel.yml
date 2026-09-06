@@ -12,11 +12,25 @@ services:
       - /compartido/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf
       - /compartido/nginx/includes/proxy.conf:/etc/nginx/includes/proxy.conf
       - /compartido/nginx/certificados:/certificados/
-      - /compartido/nginx/certificados/zuard/certs:/etc/ssl/certs/
-      - /compartido/nginx/certificados/zuard/certs:/etc/ssl/private/
+      - /compartido/nginx/letsencrypt:/etc/letsencrypt:ro
+      - /compartido/nginx/certbot-webroot:/var/www/certbot:ro
     networks:
       - victoriametrics_vm_net2
       - wordpress_rossy_default
+    restart: always
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: nginx-certbot
+    volumes:
+      - /compartido/nginx/letsencrypt:/etc/letsencrypt
+      - /compartido/nginx/certbot-webroot:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done"
     restart: always
 
 networks:
