@@ -63,6 +63,7 @@ docker run --rm -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
   sh -c "rm -rf /etc/letsencrypt/live/$first_domain /etc/letsencrypt/archive/$first_domain /etc/letsencrypt/renewal/$first_domain.conf"
 
 echo "### Solicitando el certificado real a Let's Encrypt ..."
+set +e
 docker run --rm \
   -v "$LE_DIR:/etc/letsencrypt" \
   -v "$WEBROOT_DIR:/var/www/certbot" \
@@ -71,6 +72,21 @@ docker run --rm \
   $staging_arg \
   --email "$EMAIL" --agree-tos --no-eff-email \
   "${domain_args[@]}" --force-renewal
+certonly_status=$?
+set -e
+
+if [ "$certonly_status" -ne 0 ]; then
+  echo "### Falló la emisión del certificado real. Restaurando el dummy para que nginx no se quede sin certificado ..." >&2
+  docker run --rm -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
+    sh -c "mkdir -p /etc/letsencrypt/live/$first_domain && \
+      openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
+      -keyout '/etc/letsencrypt/live/$first_domain/privkey.pem' \
+      -out '/etc/letsencrypt/live/$first_domain/fullchain.pem' \
+      -subj '/CN=localhost'"
+  docker exec nginx-otel nginx -s reload || true
+  echo "Revisa por qué falló certbot (DNS, puerto 80, rate limit) y vuelve a correr este script." >&2
+  exit 1
+fi
 
 echo "### Recargando nginx-proxy con el certificado definitivo ..."
 docker exec nginx-otel nginx -s reload
