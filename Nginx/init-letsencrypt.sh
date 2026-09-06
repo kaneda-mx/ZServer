@@ -48,8 +48,8 @@ dummy_path="$LE_DIR/live/$first_domain"
 
 echo "### Generando certificado dummy para $first_domain ..."
 mkdir -p "$dummy_path"
-docker run --rm -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
-  sh -c "mkdir -p /etc/letsencrypt/live/$first_domain && \
+docker run --rm --entrypoint /bin/sh -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
+  -c "mkdir -p /etc/letsencrypt/live/$first_domain && \
     openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
     -keyout '/etc/letsencrypt/live/$first_domain/privkey.pem' \
     -out '/etc/letsencrypt/live/$first_domain/fullchain.pem' \
@@ -59,8 +59,8 @@ echo "### Levantando nginx-proxy con el certificado dummy ..."
 docker compose -f "$COMPOSE_FILE" up -d nginx-proxy
 
 echo "### Borrando el certificado dummy ..."
-docker run --rm -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
-  sh -c "rm -rf /etc/letsencrypt/live/$first_domain /etc/letsencrypt/archive/$first_domain /etc/letsencrypt/renewal/$first_domain.conf"
+docker run --rm --entrypoint /bin/sh -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
+  -c "rm -rf /etc/letsencrypt/live/$first_domain /etc/letsencrypt/archive/$first_domain /etc/letsencrypt/renewal/$first_domain.conf"
 
 echo "### Solicitando el certificado real a Let's Encrypt ..."
 set +e
@@ -77,8 +77,8 @@ set -e
 
 if [ "$certonly_status" -ne 0 ]; then
   echo "### Falló la emisión del certificado real. Restaurando el dummy para que nginx no se quede sin certificado ..." >&2
-  docker run --rm -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
-    sh -c "mkdir -p /etc/letsencrypt/live/$first_domain && \
+  docker run --rm --entrypoint /bin/sh -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
+    -c "mkdir -p /etc/letsencrypt/live/$first_domain && \
       openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
       -keyout '/etc/letsencrypt/live/$first_domain/privkey.pem' \
       -out '/etc/letsencrypt/live/$first_domain/fullchain.pem' \
