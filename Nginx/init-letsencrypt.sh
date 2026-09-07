@@ -1,37 +1,49 @@
 #!/usr/bin/env bash
-# Bootstrap inicial de certificados Let's Encrypt para el proxy nginx compartido.
+# Bootstrap inicial de certificados Let's Encrypt (DNS-01 vía Cloudflare) para el proxy
+# nginx compartido. Al validar por DNS (registro TXT), no depende de que el puerto 80
+# esté accesible desde internet: certbot puede pedir el certificado real antes de levantar
+# nginx, sin necesidad de un certificado dummy.
 #
-# Resuelve el problema del huevo y la gallina: nginx necesita un certificado en
-# /etc/letsencrypt/live/<dominio>/ para arrancar con `listen 443 ssl`, pero ese
-# certificado real solo lo emite certbot con nginx ya corriendo (validación
-# HTTP-01 vía /.well-known/acme-challenge/). Este script:
-#   1. Genera un certificado autofirmado "dummy" para poder arrancar nginx.
-#   2. Levanta nginx-proxy.
-#   3. Borra el dummy y pide el certificado real a Let's Encrypt (webroot).
-#   4. Recarga nginx con el certificado definitivo.
+# Requisito previo: un archivo de credenciales de Cloudflare con permisos 600, contenido:
+#   dns_cloudflare_api_token = TU_TOKEN
+# (token con permiso "Zone:DNS:Edit" restringido a la(s) zona(s) de los dominios pedidos)
+#
+# Si los dominios de una corrida pertenecen a una zona/token distinto del default
+# (p.ej. zuard.net vs draquimbert.com.mx), pasa CF_INI (ruta en el host) y CF_INI_NAME
+# (nombre con el que se monta dentro del contenedor, debe ser distinto por token para que
+# el servicio de renovación pueda tener montados varios tokens a la vez sin pisarse).
 #
 # Uso: ./init-letsencrypt.sh
 # Variables de entorno opcionales:
-#   DOMAINS   Dominios separados por espacio (default: grafana.zuard.net)
-#   EMAIL     Email de contacto para Let's Encrypt (default: kanedainc@gmail.com)
-#   STAGING   1 para usar el entorno de pruebas de Let's Encrypt (default: 0)
+#   DOMAINS      Dominios separados por espacio (default: grafana.zuard.net)
+#   EMAIL        Email de contacto para Let's Encrypt (default: kanedainc@gmail.com)
+#   STAGING      1 para usar el entorno de pruebas de Let's Encrypt (default: 0)
+#   CF_INI       Ruta en el host al archivo de credenciales de Cloudflare
+#                (default: /compartido/nginx/cloudflare.ini)
+#   CF_INI_NAME  Nombre del archivo dentro del contenedor (default: cloudflare.ini)
 
 set -euo pipefail
 
 DOMAINS="${DOMAINS:-grafana.zuard.net}"
 EMAIL="${EMAIL:-kanedainc@gmail.com}"
 STAGING="${STAGING:-0}"
+CF_INI="${CF_INI:-/compartido/nginx/cloudflare.ini}"
+CF_INI_NAME="${CF_INI_NAME:-cloudflare.ini}"
 
 COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/ngnix-otel.yml"
 LE_DIR="/compartido/nginx/letsencrypt"
-WEBROOT_DIR="/compartido/nginx/certbot-webroot"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Error: docker no está instalado en este host." >&2
   exit 1
 fi
 
-mkdir -p "$LE_DIR" "$WEBROOT_DIR"
+if [ ! -f "$CF_INI" ]; then
+  echo "Error: no existe $CF_INI. Créalo con 'dns_cloudflare_api_token = TU_TOKEN' y chmod 600." >&2
+  exit 1
+fi
+
+mkdir -p "$LE_DIR"
 
 domain_args=()
 for domain in $DOMAINS; do
@@ -43,55 +55,31 @@ if [ "$STAGING" != "0" ]; then
   staging_arg="--staging"
 fi
 
-first_domain="$(echo "$DOMAINS" | awk '{print $1}')"
-dummy_path="$LE_DIR/live/$first_domain"
+for domain in $DOMAINS; do
+  live_dir="$LE_DIR/live/$domain"
+  renewal_conf="$LE_DIR/renewal/$domain.conf"
+  if [ -d "$live_dir" ] && [ ! -f "$renewal_conf" ]; then
+    echo "### Limpiando directorio residual sin lineage válido de certbot: $live_dir ..."
+    rm -rf "$live_dir" "$LE_DIR/archive/$domain"
+  fi
+done
 
-echo "### Generando certificado dummy para $first_domain ..."
-mkdir -p "$dummy_path"
-docker run --rm --entrypoint /bin/sh -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
-  -c "mkdir -p /etc/letsencrypt/live/$first_domain && \
-    openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
-    -keyout '/etc/letsencrypt/live/$first_domain/privkey.pem' \
-    -out '/etc/letsencrypt/live/$first_domain/fullchain.pem' \
-    -subj '/CN=localhost'"
-
-echo "### Levantando nginx-proxy con el certificado dummy ..."
-docker compose -f "$COMPOSE_FILE" up -d nginx-proxy
-
-echo "### Borrando el certificado dummy ..."
-docker run --rm --entrypoint /bin/sh -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
-  -c "rm -rf /etc/letsencrypt/live/$first_domain /etc/letsencrypt/archive/$first_domain /etc/letsencrypt/renewal/$first_domain.conf"
-
-echo "### Solicitando el certificado real a Let's Encrypt ..."
-set +e
+echo "### Solicitando certificado a Let's Encrypt vía DNS-01 (Cloudflare) ..."
 docker run --rm \
   -v "$LE_DIR:/etc/letsencrypt" \
-  -v "$WEBROOT_DIR:/var/www/certbot" \
-  certbot/certbot:latest certonly \
-  --webroot -w /var/www/certbot \
+  -v "$CF_INI:/etc/letsencrypt/$CF_INI_NAME:ro" \
+  certbot/dns-cloudflare:latest certonly \
+  --dns-cloudflare --dns-cloudflare-credentials "/etc/letsencrypt/$CF_INI_NAME" \
+  --dns-cloudflare-propagation-seconds 30 \
   $staging_arg \
   --email "$EMAIL" --agree-tos --no-eff-email \
-  "${domain_args[@]}" --force-renewal
-certonly_status=$?
-set -e
+  "${domain_args[@]}"
 
-if [ "$certonly_status" -ne 0 ]; then
-  echo "### Falló la emisión del certificado real. Restaurando el dummy para que nginx no se quede sin certificado ..." >&2
-  docker run --rm --entrypoint /bin/sh -v "$LE_DIR:/etc/letsencrypt" certbot/certbot:latest \
-    -c "mkdir -p /etc/letsencrypt/live/$first_domain && \
-      openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
-      -keyout '/etc/letsencrypt/live/$first_domain/privkey.pem' \
-      -out '/etc/letsencrypt/live/$first_domain/fullchain.pem' \
-      -subj '/CN=localhost'"
-  docker exec nginx-otel nginx -s reload || true
-  echo "Revisa por qué falló certbot (DNS, puerto 80, rate limit) y vuelve a correr este script." >&2
-  exit 1
-fi
-
-echo "### Recargando nginx-proxy con el certificado definitivo ..."
-docker exec nginx-otel nginx -s reload
+echo "### Levantando nginx-proxy con el certificado real ..."
+docker compose -f "$COMPOSE_FILE" up -d nginx-proxy
+docker exec nginx-otel nginx -s reload 2>/dev/null || true
 
 echo "### Levantando el servicio certbot de renovación automática ..."
 docker compose -f "$COMPOSE_FILE" up -d certbot
 
-echo "Listo. Certificados en $LE_DIR/live/$first_domain/"
+echo "Listo. Certificados en $LE_DIR/live/<dominio>/"
